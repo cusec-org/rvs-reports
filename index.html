@@ -297,6 +297,7 @@
   </div>
   <h1>RVS Report &amp; Status Dashboard</h1>
   <div class="header-right">
+    <span id="service-badge" style="display:none;background:var(--amber);color:#fff;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;padding:4px 10px;border-radius:999px"></span>
     <span id="user-name"></span>
     <button id="auth-btn" onclick="handleAuth()">Sign in with ArcGIS</button>
   </div>
@@ -365,10 +366,58 @@
 // ─────────────────────────────────────────────────────────────
 const ARCGIS_CLIENT_ID  = 'wABmvoplhiLmzBmi';
 const ARCGIS_PORTAL_URL = 'https://www.arcgis.com';
-const FEATURE_SERVICE   = 'https://services3.arcgis.com/mQsIDpmRUmYltsYD/ArcGIS/rest/services/CUSEC_RVS_All/FeatureServer/0';
-// Batch Combined Report — update item IDs to match your ArcGIS print templates
-const BATCH_P154_ITEM_ID          = 'f230e33babf54301a0c2cabdf94ff09a';
-const BATCH_NONSTRUCTURAL_ITEM_ID = 'f230e33babf54301a0c2cabdf94ff09a';
+
+// ── Service selection ─────────────────────────────────────────
+// Open the page with ?service=new to point the dashboard AND every report link
+// at the new feature service (RVS Final Form v3). No parameter (or service=old)
+// keeps the original behaviour.
+const SERVICES = {
+  old: {
+    label: 'Old service',
+    // Dashboard statistics come from this fixed layer URL.
+    featureService: 'https://services3.arcgis.com/mQsIDpmRUmYltsYD/ArcGIS/rest/services/CUSEC_RVS_All/FeatureServer/0',
+    // Batch Combined Report item IDs
+    batchP154ItemId:          'f230e33babf54301a0c2cabdf94ff09a',
+    batchNonstructuralItemId: 'f230e33babf54301a0c2cabdf94ff09a',
+  },
+  new: {
+    label: 'New service (Final Form v3)',
+    // Looked up from the item ID after sign-in (see resolveFeatureService).
+    itemId: '70d1f24a8ae34897b3769f587851a756',
+    featureService: null,
+    batchP154ItemId:          '70d1f24a8ae34897b3769f587851a756',
+    batchNonstructuralItemId: '70d1f24a8ae34897b3769f587851a756',
+  },
+};
+function resolveServiceKey() {
+  let key = (new URLSearchParams(window.location.search).get('service') || '').trim().toLowerCase();
+  // A standalone sign-in redirect drops the query string, so handleAuth()
+  // stashes the choice and we pick it back up here.
+  try {
+    if (!key && window.location.hash.includes('access_token')) {
+      key = sessionStorage.getItem('rvs_service_pending') || '';
+    }
+    sessionStorage.removeItem('rvs_service_pending');
+  } catch (_) {}
+  if (key && !SERVICES[key]) { console.warn(`Unknown service '${key}', using old.`); key = ''; }
+  return key || 'old';
+}
+const SERVICE_KEY = resolveServiceKey();
+const ACTIVE      = SERVICES[SERVICE_KEY];
+let FEATURE_SERVICE = ACTIVE.featureService;
+const BATCH_P154_ITEM_ID          = ACTIVE.batchP154ItemId;
+const BATCH_NONSTRUCTURAL_ITEM_ID = ACTIVE.batchNonstructuralItemId;
+
+async function resolveFeatureService() {
+  if (FEATURE_SERVICE) return;
+  const r = await fetch(`${ARCGIS_PORTAL_URL}/sharing/rest/content/items/${ACTIVE.itemId}`, {
+    method: 'POST',
+    body: new URLSearchParams({ f: 'json', token }),
+  });
+  const j = await r.json();
+  if (j.error || !j.url) throw new Error((j.error && j.error.message) || 'Could not find the new feature service');
+  FEATURE_SERVICE = `${j.url.replace(/\/+$/, '')}/0`;
+}
 // Report endpoint map
 const REPORTS = [
   {
@@ -455,6 +504,7 @@ function getRedirectUri() {
 // tick as the user click, or the browser will block the popup.
 function handleAuth() {
   if (token) { signOut(); return; }
+  try { sessionStorage.setItem('rvs_service_pending', SERVICE_KEY); } catch (_) {}
   if (ARCGIS_CLIENT_ID === 'YOUR_CLIENT_ID_HERE') {
     alert('Please set your ArcGIS Client ID in the script configuration at the top of this file.');
     return;
@@ -643,6 +693,9 @@ function buildReportUrl(base, st, co, isStatewide, extra = {}) {
   const params = new URLSearchParams({ state: st || '' });
   params.set('county', isStatewide ? 'Statewide' : (co || ''));
   Object.entries(extra).forEach(([k, v]) => { if (v) params.set(k, v); });
+  // Tell the report functions which feature service to read. Omitted for the
+  // old service so existing links stay exactly as they were.
+  if (SERVICE_KEY !== 'old') params.set('service', SERVICE_KEY);
   return `${base}?${params}`;
 }
 function renderReports() {
@@ -761,11 +814,18 @@ async function enterDashboard() {
   document.getElementById('auth-gate').style.display  = 'none';
   document.getElementById('dashboard').style.display  = '';
   try {
+    await resolveFeatureService();
     const states = await fetchStates();
     const sel = document.getElementById('state-select');
     sel.innerHTML = '<option value="">— All States —</option>'
       + states.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('');
-  } catch(e) { console.error('Failed to fetch states', e); }
+  } catch(e) {
+    console.error('Failed to fetch states', e);
+    const el = document.getElementById('phase-grid');
+    el.textContent = `Error: ${e.message}`;
+    el.style.cssText = 'color:red;font-size:13px';
+    return;
+  }
   loadData();
 }
 async function completeSignIn(tok, uname) {
@@ -784,6 +844,12 @@ async function completeSignIn(tok, uname) {
 // ── Init ──────────────────────────────────────────────────────
 async function init() {
   document.getElementById('redirect-display').textContent = getRedirectUri();
+  if (SERVICE_KEY !== 'old') {
+    const badge = document.getElementById('service-badge');
+    badge.textContent = ACTIVE.label;
+    badge.style.display = '';
+    document.title += ' — New Service';
+  }
   if (ARCGIS_CLIENT_ID === 'YOUR_CLIENT_ID_HERE') {
     document.getElementById('config-note').style.display = 'flex';
   }
@@ -814,7 +880,8 @@ async function init() {
   // ── Normal (non-popup) token handling ────────────────────
   if (access_token) {
     // Standalone redirect — token landed directly in this page's hash
-    history.replaceState(null, '', window.location.pathname + window.location.search);
+    const keepSearch = window.location.search || (SERVICE_KEY !== 'old' ? `?service=${SERVICE_KEY}` : '');
+    history.replaceState(null, '', window.location.pathname + keepSearch);
     await completeSignIn(access_token, uname);
     return;
   }
